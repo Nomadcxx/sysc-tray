@@ -2,6 +2,8 @@ package item
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -254,8 +256,9 @@ type fakeItem struct {
 	key   protocol.ItemKey
 	count atomic.Int64
 
-	mu    sync.Mutex
-	props map[string]dbus.Variant
+	mu       sync.Mutex
+	props    map[string]dbus.Variant
+	recorded []string
 }
 
 func exportFakeItem(t *testing.T, host *dbus.Conn, props map[string]dbus.Variant) *fakeItem {
@@ -354,4 +357,89 @@ func TestLimiterBoundsPerItemAndGlobalRates(t *testing.T) {
 	if wait := limiter.Reserve(first); wait != 0 {
 		t.Fatalf("forgotten item waited %v", wait)
 	}
+}
+
+func TestProxyInvokesItemCommandsAndRefusesStaleGenerations(t *testing.T) {
+	conn := privateConn(t)
+	fake := exportFakeItem(t, conn, minimalProps())
+	fake.exportMethods(t)
+	results := make(chan Result, 8)
+	proxy := start(t, conn, fake.key, results)
+	defer proxy.Close()
+	awaitResult(t, results)
+
+	if err := proxy.Activate(fake.key, 10, 20); err != nil {
+		t.Fatal(err)
+	}
+	if err := proxy.SecondaryActivate(fake.key, 11, 21); err != nil {
+		t.Fatal(err)
+	}
+	if err := proxy.Scroll(fake.key, -120, protocol.ScrollVertical); err != nil {
+		t.Fatal(err)
+	}
+	got := fake.calls()
+	if len(got) != 3 || got[0] != "Activate(10,20)" || got[1] != "SecondaryActivate(11,21)" {
+		t.Fatalf("recorded calls = %v", got)
+	}
+	if got[2] != "Scroll(-120,vertical)" {
+		t.Fatalf("scroll recorded as %q", got[2])
+	}
+
+	if err := proxy.Scroll(fake.key, 1, protocol.ScrollOrientation("diagonal")); err == nil {
+		t.Fatal("an unknown scroll orientation was invoked")
+	}
+
+	other := fake.key
+	other.Generation++
+	for name, err := range map[string]error{
+		"activate":  proxy.Activate(other, 1, 1),
+		"secondary": proxy.SecondaryActivate(other, 1, 1),
+		"scroll":    proxy.Scroll(other, 1, protocol.ScrollVertical),
+	} {
+		var refusal *protocol.ProtocolError
+		if !errors.As(err, &refusal) || refusal.Code != protocol.ErrorStaleItem {
+			t.Fatalf("%s for another generation returned %v, want stale_item", name, err)
+		}
+	}
+	if len(fake.calls()) != 3 {
+		t.Fatalf("a stale command reached the item: %v", fake.calls())
+	}
+}
+
+func (f *fakeItem) exportMethods(t *testing.T) {
+	t.Helper()
+	if err := f.conn.Export(methods{fake: f}, dbus.ObjectPath(f.key.ObjectPath), ItemInterface); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type methods struct {
+	fake *fakeItem
+}
+
+func (m methods) Activate(x, y int32) *dbus.Error {
+	m.fake.record(fmt.Sprintf("Activate(%d,%d)", x, y))
+	return nil
+}
+
+func (m methods) SecondaryActivate(x, y int32) *dbus.Error {
+	m.fake.record(fmt.Sprintf("SecondaryActivate(%d,%d)", x, y))
+	return nil
+}
+
+func (m methods) Scroll(delta int32, orientation string) *dbus.Error {
+	m.fake.record(fmt.Sprintf("Scroll(%d,%s)", delta, orientation))
+	return nil
+}
+
+func (f *fakeItem) record(call string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.recorded = append(f.recorded, call)
+}
+
+func (f *fakeItem) calls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.recorded...)
 }

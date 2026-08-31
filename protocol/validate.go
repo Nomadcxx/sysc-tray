@@ -376,3 +376,15 @@ func (c ErrorCode) valid() bool {
 		return false
 	}
 }
+
+// Error lets a typed protocol failure travel as a Go error inside the service
+// before it is serialized into a reply.
+func (e *ProtocolError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	if e.Message == "" {
+		return string(e.Code)
+	}
+	return string(e.Code) + ": " + e.Message
+}

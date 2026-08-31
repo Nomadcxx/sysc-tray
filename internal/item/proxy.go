@@ -198,3 +198,35 @@ func (p *Proxy) refresh() {
 	}
 	p.publish(Result{Key: p.key, Item: item})
 }
+
+// Activate, SecondaryActivate, and Scroll invoke the item's own methods with
+// compositor-logical coordinates. Each rechecks the item generation immediately
+// before the call, and none is ever retried: the effect may already have
+// happened and a repeat would activate the item twice.
+func (p *Proxy) Activate(key protocol.ItemKey, x, y int32) error {
+	return p.invoke(key, "Activate", x, y)
+}
+
+func (p *Proxy) SecondaryActivate(key protocol.ItemKey, x, y int32) error {
+	return p.invoke(key, "SecondaryActivate", x, y)
+}
+
+func (p *Proxy) Scroll(key protocol.ItemKey, delta int32, orientation protocol.ScrollOrientation) error {
+	switch orientation {
+	case protocol.ScrollVertical, protocol.ScrollHorizontal:
+	default:
+		return &protocol.ProtocolError{Code: protocol.ErrorInvalid, Message: "unknown scroll orientation"}
+	}
+	return p.invoke(key, "Scroll", delta, string(orientation))
+}
+
+func (p *Proxy) invoke(key protocol.ItemKey, member string, args ...any) error {
+	if key != p.key {
+		return &protocol.ProtocolError{Code: protocol.ErrorStaleItem, Message: "item generation changed"}
+	}
+	object := p.conn.Object(p.key.Owner, dbus.ObjectPath(p.key.ObjectPath))
+	if call := object.Call(ItemInterface+"."+member, 0, args...); call.Err != nil {
+		return &protocol.ProtocolError{Code: protocol.ErrorUnavailable, Message: call.Err.Error()}
+	}
+	return nil
+}

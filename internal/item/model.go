@@ -4,7 +4,6 @@
 package item
 
 import (
-	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/godbus/dbus/v5"
 
+	"github.com/Nomadcxx/sysc-tray/internal/dbusval"
 	"github.com/Nomadcxx/sysc-tray/protocol"
 )
 
@@ -117,14 +117,14 @@ func tooltip(props map[string]dbus.Variant, budget *int) protocol.Tooltip {
 	if !ok {
 		return protocol.Tooltip{}
 	}
-	fields, ok := tupleFields(variant.Value(), 4)
+	fields, ok := dbusval.Tuple(variant.Value(), 4)
 	if !ok {
 		return protocol.Tooltip{}
 	}
 	result := protocol.Tooltip{
-		IconName:    clamp(stringOf(fields[0]), protocol.MaxTextBytes),
-		Title:       clamp(stringOf(fields[2]), protocol.MaxTooltipBytes),
-		Description: clamp(stringOf(fields[3]), protocol.MaxTooltipBytes),
+		IconName:    clamp(dbusval.String(fields[0]), protocol.MaxTextBytes),
+		Title:       clamp(dbusval.String(fields[2]), protocol.MaxTooltipBytes),
+		Description: clamp(dbusval.String(fields[3]), protocol.MaxTooltipBytes),
 	}
 	if fields[1].IsValid() && fields[1].CanInterface() {
 		result.Pixmaps = decodePixmaps(dbus.MakeVariant(fields[1].Interface()), *budget)
@@ -133,40 +133,6 @@ func tooltip(props map[string]dbus.Variant, budget *int) protocol.Tooltip {
 		}
 	}
 	return result
-}
-
-// tupleFields reads a D-Bus struct, accepting both the Go struct form and the
-// []interface{} form the bus decoder produces.
-func tupleFields(value any, want int) ([]reflect.Value, bool) {
-	root := indirect(reflect.ValueOf(value))
-	if !root.IsValid() {
-		return nil, false
-	}
-	var read func(int) reflect.Value
-	var length int
-	switch root.Kind() {
-	case reflect.Struct:
-		length, read = root.NumField(), root.Field
-	case reflect.Slice, reflect.Array:
-		length, read = root.Len(), root.Index
-	default:
-		return nil, false
-	}
-	if length < want {
-		return nil, false
-	}
-	fields := make([]reflect.Value, want)
-	for i := range fields {
-		fields[i] = indirect(read(i))
-	}
-	return fields, true
-}
-
-func stringOf(value reflect.Value) string {
-	if !value.IsValid() || value.Kind() != reflect.String {
-		return ""
-	}
-	return value.String()
 }
 
 func text(props map[string]dbus.Variant, name string, limit int) string {
