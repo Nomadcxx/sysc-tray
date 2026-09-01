@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/godbus/dbus/v5"
+
+	"github.com/Nomadcxx/sysc-tray/internal/dbustest"
 )
 
 func TestWatcherAttachesToHealthyExternalWatcher(t *testing.T) {
@@ -45,7 +47,7 @@ func TestWatcherAttachesToHealthyExternalWatcher(t *testing.T) {
 }
 
 func TestWatcherAcquiresTheNameWhenTheExternalWatcherLeaves(t *testing.T) {
-	externalConn, err := dbus.ConnectSessionBus()
+	externalConn, err := dbus.Connect(dbustest.Session(t))
 	if err != nil {
 		t.Fatal(err)
 	}

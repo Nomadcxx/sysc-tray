@@ -3,12 +3,13 @@ package menu
 import (
 	"context"
 	"errors"
-	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/godbus/dbus/v5"
+
+	"github.com/Nomadcxx/sysc-tray/internal/dbustest"
 
 	"github.com/Nomadcxx/sysc-tray/protocol"
 )
@@ -369,13 +370,5 @@ func (f *fakeMenu) emitPropertiesUpdated(t *testing.T) {
 
 func privateConn(t *testing.T) *dbus.Conn {
 	t.Helper()
-	if os.Getenv("DBUS_SESSION_BUS_ADDRESS") == "" {
-		t.Skip("no private session bus; run under dbus-run-session")
-	}
-	conn, err := dbus.ConnectSessionBus()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-	return conn
+	return dbustest.Connect(t)
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +11,8 @@ import (
 	"time"
 
 	"github.com/godbus/dbus/v5"
+
+	"github.com/Nomadcxx/sysc-tray/internal/dbustest"
 
 	"github.com/Nomadcxx/sysc-tray/protocol"
 )
@@ -182,7 +183,7 @@ func TestProxyStopsPublishingAfterClose(t *testing.T) {
 
 func TestProxyReportsOwnerLoss(t *testing.T) {
 	host := privateConn(t)
-	ownerConn, err := dbus.ConnectSessionBus()
+	ownerConn, err := dbus.Connect(dbustest.Session(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,15 +312,7 @@ func (f *fakeItem) GetAll(iface string) (map[string]dbus.Variant, *dbus.Error) {
 
 func privateConn(t *testing.T) *dbus.Conn {
 	t.Helper()
-	if os.Getenv("DBUS_SESSION_BUS_ADDRESS") == "" {
-		t.Skip("no private session bus; run under dbus-run-session")
-	}
-	conn, err := dbus.ConnectSessionBus()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-	return conn
+	return dbustest.Connect(t)
 }
 
 func TestLimiterBoundsPerItemAndGlobalRates(t *testing.T) {

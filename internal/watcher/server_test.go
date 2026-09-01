@@ -1,11 +1,12 @@
 package watcher
 
 import (
-	"os"
 	"testing"
 	"time"
 
 	"github.com/godbus/dbus/v5"
+
+	"github.com/Nomadcxx/sysc-tray/internal/dbustest"
 )
 
 func TestServerOwnsWatcherAndPublishesRegistrations(t *testing.T) {
@@ -98,7 +99,7 @@ func TestServerDropsItemsWhenTheirOwnerLeaves(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = server.Close() })
 
-	item, err := dbus.ConnectSessionBus()
+	item, err := dbus.Connect(dbustest.Session(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,15 +143,7 @@ func TestServerRegistersHostIdentityOnce(t *testing.T) {
 
 func privateConn(t *testing.T) *dbus.Conn {
 	t.Helper()
-	if os.Getenv("DBUS_SESSION_BUS_ADDRESS") == "" {
-		t.Skip("no private session bus; run under dbus-run-session")
-	}
-	conn, err := dbus.ConnectSessionBus()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-	return conn
+	return dbustest.Connect(t)
 }
 
 func registerItem(t *testing.T, conn *dbus.Conn, argument string) {
