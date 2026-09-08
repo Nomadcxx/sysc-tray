@@ -26,7 +26,7 @@ const (
 
 // Key names one item generation. A well-known bus name is reusable, so it never
 // identifies an item on its own: identity is the unique owner, the object path,
-// and a generation that advances whenever the pair is re-registered.
+// and a generation that advances when a retired pair is registered again.
 type Key struct {
 	Owner      string
 	ObjectPath dbus.ObjectPath
@@ -41,9 +41,8 @@ type Address struct {
 
 func (a Address) String() string { return a.Owner + string(a.ObjectPath) }
 
-// Observer receives registry transitions in order. A replacement is always
-// reported as a removal of the old generation followed by the addition of the
-// new one, so a consumer never holds two live generations of one address.
+// Observer receives registry transitions in order. A retired generation is
+// reported as removed before the address can be registered again.
 type Observer interface {
 	ItemAdded(Key)
 	ItemRemoved(Key)

@@ -1,7 +1,10 @@
 package integration
 
 import (
+	"errors"
+	"net"
 	"testing"
+	"time"
 
 	"github.com/godbus/dbus/v5"
 
@@ -54,21 +57,29 @@ func TestItemIsRetiredWhenItsApplicationLeavesTheBus(t *testing.T) {
 	presenter.awaitRemoval(t, item.Key)
 }
 
-func TestReregisteringReplacesTheOldGeneration(t *testing.T) {
+func TestDuplicateRegistrationKeepsTheExistingGeneration(t *testing.T) {
 	presenter := service(t)
 	application := newTrayApp(t, baseProps("chat", "Chat"))
 	application.register(t, string(itemPath))
 	first := presenter.awaitItem(t, func(i protocol.Item) bool { return i.ID == "chat" })
 
-	application.set("Title", dbus.MakeVariant("Chat (2)"))
 	application.register(t, string(itemPath))
+	if err := presenter.conn.SetReadDeadline(time.Now().Add(250 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	_, err := protocol.ReadFrame(presenter.conn)
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Fatalf("duplicate registration published a delta: %v", err)
+	}
 
-	presenter.awaitRemoval(t, first.Key)
-	second := presenter.awaitItem(t, func(i protocol.Item) bool {
-		return i.ID == "chat" && i.Key.Generation > first.Key.Generation
+	application.set("Title", dbus.MakeVariant("Chat (2)"))
+	application.emit(t, "NewTitle")
+	updated := presenter.awaitItem(t, func(i protocol.Item) bool {
+		return i.ID == "chat" && i.Title == "Chat (2)"
 	})
-	if second.Key.Owner != first.Key.Owner {
-		t.Fatalf("replacement owner = %q, want %q", second.Key.Owner, first.Key.Owner)
+	if updated.Key != first.Key {
+		t.Fatalf("updated key = %+v, want original %+v", updated.Key, first.Key)
 	}
 }
 

@@ -192,9 +192,9 @@ func (s *Server) register(sender, argument string) *dbus.Error {
 		return dbus.NewError(dbusInvalidArgs, []any{err.Error()})
 	}
 	s.mu.Lock()
-	previous, replaced := s.items[address]
-	if replaced {
-		delete(s.items, address)
+	if _, registered := s.items[address]; registered {
+		s.mu.Unlock()
+		return nil
 	}
 	s.generation++
 	key := Key{Owner: address.Owner, ObjectPath: address.ObjectPath, Generation: s.generation}
@@ -202,9 +202,6 @@ func (s *Server) register(sender, argument string) *dbus.Error {
 	s.publishItemsLocked()
 	s.mu.Unlock()
 
-	if replaced {
-		s.emitUnregistered(previous)
-	}
 	s.observer.ItemAdded(key)
 	_ = s.conn.Emit(ObjectPath, Interface+"."+signalItemRegistered, address.String())
 	return nil
