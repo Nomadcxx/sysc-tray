@@ -304,3 +304,36 @@ func sampleMenu(revision uint32) protocol.Menu {
 	return protocol.Menu{Revision: revision, Root: protocol.MenuNode{ID: 0, Visible: true,
 		Children: []protocol.MenuNode{{ID: 1, Label: "Open", Enabled: true, Visible: true}}}}
 }
+
+// A read that found nothing new is not an event. Without this the ownership
+// refresh republished every registration, and an application emitting property
+// signals on a timer spent a marshal and a frame each time to say nothing.
+func TestUpdateWithNoChangePublishesNothing(t *testing.T) {
+	owner := Start()
+	defer func() { _ = owner.Close() }()
+	sink := attach(t, owner)
+	key := protocol.ItemKey{Owner: ":1.7", ObjectPath: "/StatusNotifierItem", Generation: 1}
+	owner.Add(key)
+	item := protocol.Item{
+		Key: key, ID: "chat", Title: "Chat",
+		Category: protocol.CategoryApplicationStatus, Status: protocol.StatusActive,
+		Icon: protocol.Icon{Name: "chat"},
+	}
+	owner.Update(key, item)
+	after := sink.count()
+	if after == 0 {
+		t.Fatal("the first update published nothing")
+	}
+
+	owner.Update(key, item)
+	if got := sink.count(); got != after {
+		t.Fatalf("an identical update published %d extra envelope(s)", got-after)
+	}
+
+	changed := item
+	changed.Title = "Chat (2)"
+	owner.Update(key, changed)
+	if got := sink.count(); got != after+1 {
+		t.Fatalf("a real change published %d envelopes, want one", got-after)
+	}
+}

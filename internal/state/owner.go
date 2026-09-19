@@ -6,6 +6,7 @@ package state
 import (
 	"encoding/json"
 	"errors"
+	"reflect"
 	"sort"
 
 	"github.com/Nomadcxx/sysc-tray/protocol"
@@ -125,7 +126,17 @@ func (o *Owner) Update(key protocol.ItemKey, item protocol.Item) {
 			// never becomes publishable.
 			return
 		}
-		record.item = cloneItem(item)
+		next := cloneItem(item)
+		// A read that found nothing new is not an event. The ownership
+		// inspection refreshes every registration once, and applications emit
+		// property signals far more often than their properties actually
+		// change, so publishing unconditionally spends a marshal and a frame
+		// per no-op and makes "nothing changed" indistinguishable on the wire
+		// from "changed back".
+		if record.published && record.hasItem && reflect.DeepEqual(record.item, next) {
+			return
+		}
+		record.item = next
 		record.hasItem = true
 		if record.published {
 			o.publish(protocol.KindItemChanged, record.item)

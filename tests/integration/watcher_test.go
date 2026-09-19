@@ -61,7 +61,14 @@ func TestDuplicateRegistrationKeepsTheExistingGeneration(t *testing.T) {
 	presenter := service(t)
 	application := newTrayApp(t, baseProps("chat", "Chat"))
 	application.register(t, string(itemPath))
-	first := presenter.awaitItem(t, func(i protocol.Item) bool { return i.ID == "chat" })
+	// Registration settles in two steps: the item is published, then the
+	// asynchronous ownership inspection refreshes it so CloseSupported is
+	// deterministic. Waiting for the second one keeps that expected delta out
+	// of the silence this test asserts; without it the refresh lands inside
+	// the window and reads as a duplicate registration publishing a change.
+	first := presenter.awaitItem(t, func(i protocol.Item) bool {
+		return i.ID == "chat" && i.CloseSupported
+	})
 
 	application.register(t, string(itemPath))
 	if err := presenter.conn.SetReadDeadline(time.Now().Add(250 * time.Millisecond)); err != nil {
