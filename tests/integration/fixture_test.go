@@ -55,6 +55,10 @@ type client struct {
 	conn      net.Conn
 	snapshot  protocol.Snapshot
 	requestID uint64
+	// pending holds deltas a previous helper set aside because they did not
+	// match what it was waiting for; a removal can race the reply that
+	// triggered it, so helpers must never discard cross-kind envelopes.
+	pending []protocol.Envelope
 }
 
 func connect(t *testing.T, path string) *client {
@@ -117,24 +121,83 @@ func (c *client) read(t *testing.T) protocol.Envelope {
 	return envelope
 }
 
+// hold sets an envelope aside for a later helper. A helper must scan pending
+// once per call and never re-hold what it popped: an envelope that is popped,
+// rejected, and re-appended would spin between pending and the same helper
+// forever, starving the wire.
+func (c *client) hold(envelope protocol.Envelope) {
+	c.pending = append(c.pending, envelope)
+}
+
+// fromPending returns the first set-aside envelope that satisfies match,
+// removing it from pending. It reports whether one was found.
+func (c *client) fromPending(match func(protocol.Envelope) bool) (protocol.Envelope, bool) {
+	for i, envelope := range c.pending {
+		if match(envelope) {
+			c.pending = append(c.pending[:i], c.pending[i+1:]...)
+			return envelope, true
+		}
+	}
+	return protocol.Envelope{}, false
+}
+
+func (c *client) itemFrom(t *testing.T, envelope protocol.Envelope, match func(protocol.Item) bool) *protocol.Item {
+	t.Helper()
+	var item protocol.Item
+	if err := protocol.DecodeStrict(envelope.Payload, &item); err != nil {
+		t.Fatal(err)
+	}
+	if err := item.Validate(); err != nil {
+		t.Fatalf("service published an invalid item: %v", err)
+	}
+	if match(item) {
+		return &item
+	}
+	return nil
+}
+
+func (c *client) menuFrom(t *testing.T, envelope protocol.Envelope, match func(protocol.MenuUpdate) bool) *protocol.MenuUpdate {
+	t.Helper()
+	var update protocol.MenuUpdate
+	if err := protocol.DecodeStrict(envelope.Payload, &update); err != nil {
+		t.Fatal(err)
+	}
+	if err := update.Menu.Validate(); err != nil {
+		t.Fatalf("service published an invalid menu: %v", err)
+	}
+	if match(update) {
+		return &update
+	}
+	return nil
+}
+
+func (c *client) removalFrom(t *testing.T, envelope protocol.Envelope, key protocol.ItemKey) bool {
+	t.Helper()
+	var removed protocol.ItemRemoved
+	if err := protocol.DecodeStrict(envelope.Payload, &removed); err != nil {
+		t.Fatal(err)
+	}
+	return removed.Key == key
+}
+
 // awaitItem reads deltas until a published item satisfies match.
 func (c *client) awaitItem(t *testing.T, match func(protocol.Item) bool) protocol.Item {
 	t.Helper()
 	deadline := time.Now().Add(8 * time.Second)
+	itemEnvelope := func(envelope protocol.Envelope) bool {
+		return envelope.Kind == protocol.KindItemAdded || envelope.Kind == protocol.KindItemChanged
+	}
+	if envelope, ok := c.fromPending(itemEnvelope); ok {
+		return *c.itemFrom(t, envelope, match)
+	}
 	for time.Now().Before(deadline) {
 		envelope := c.read(t)
-		switch envelope.Kind {
-		case protocol.KindItemAdded, protocol.KindItemChanged:
-			var item protocol.Item
-			if err := protocol.DecodeStrict(envelope.Payload, &item); err != nil {
-				t.Fatal(err)
-			}
-			if err := item.Validate(); err != nil {
-				t.Fatalf("service published an invalid item: %v", err)
-			}
-			if match(item) {
-				return item
-			}
+		if !itemEnvelope(envelope) {
+			c.hold(envelope)
+			continue
+		}
+		if item := c.itemFrom(t, envelope, match); item != nil {
+			return *item
 		}
 	}
 	t.Fatal("no matching item was published")
@@ -145,20 +208,17 @@ func (c *client) awaitItem(t *testing.T, match func(protocol.Item) bool) protoco
 func (c *client) awaitMenu(t *testing.T, match func(protocol.MenuUpdate) bool) protocol.MenuUpdate {
 	t.Helper()
 	deadline := time.Now().Add(8 * time.Second)
+	if envelope, ok := c.fromPending(func(e protocol.Envelope) bool { return e.Kind == protocol.KindMenuUpdated }); ok {
+		return *c.menuFrom(t, envelope, match)
+	}
 	for time.Now().Before(deadline) {
 		envelope := c.read(t)
 		if envelope.Kind != protocol.KindMenuUpdated {
+			c.hold(envelope)
 			continue
 		}
-		var update protocol.MenuUpdate
-		if err := protocol.DecodeStrict(envelope.Payload, &update); err != nil {
-			t.Fatal(err)
-		}
-		if err := update.Menu.Validate(); err != nil {
-			t.Fatalf("service published an invalid menu: %v", err)
-		}
-		if match(update) {
-			return update
+		if update := c.menuFrom(t, envelope, match); update != nil {
+			return *update
 		}
 	}
 	t.Fatal("no matching menu update was published")
@@ -168,16 +228,17 @@ func (c *client) awaitMenu(t *testing.T, match func(protocol.MenuUpdate) bool) p
 func (c *client) awaitRemoval(t *testing.T, key protocol.ItemKey) {
 	t.Helper()
 	deadline := time.Now().Add(8 * time.Second)
+	if envelope, ok := c.fromPending(func(e protocol.Envelope) bool { return e.Kind == protocol.KindItemRemoved }); ok {
+		c.removalFrom(t, envelope, key)
+		return
+	}
 	for time.Now().Before(deadline) {
 		envelope := c.read(t)
 		if envelope.Kind != protocol.KindItemRemoved {
+			c.hold(envelope)
 			continue
 		}
-		var removed protocol.ItemRemoved
-		if err := protocol.DecodeStrict(envelope.Payload, &removed); err != nil {
-			t.Fatal(err)
-		}
-		if removed.Key == key {
+		if c.removalFrom(t, envelope, key) {
 			return
 		}
 	}
@@ -194,10 +255,12 @@ func (c *client) send(t *testing.T, command protocol.Command) protocol.Reply {
 	c.write(t, protocol.Envelope{
 		Kind: protocol.KindCommand, RequestID: c.requestID, Payload: payload,
 	})
+	// Replies are never set aside, so only the wire can carry this one.
 	deadline := time.Now().Add(8 * time.Second)
 	for time.Now().Before(deadline) {
 		envelope := c.read(t)
 		if envelope.Kind != protocol.KindReply {
+			c.hold(envelope)
 			continue
 		}
 		if envelope.RequestID != c.requestID {

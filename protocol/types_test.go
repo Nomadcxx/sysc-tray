@@ -140,6 +140,7 @@ func TestCommandsAndRepliesValidateTypedCorrelation(t *testing.T) {
 		{Kind: CommandMenuSelect, Item: key, MenuRevision: 4, MenuID: 7},
 		{Kind: CommandAboutToShow, Item: key, MenuRevision: 4, MenuID: 0},
 		{Kind: CommandMenuClose, Item: key, MenuRevision: 4},
+		{Kind: CommandTerminate, Item: key},
 	} {
 		if err := command.Validate(); err != nil {
 			t.Fatalf("%q: %v", command.Kind, err)
@@ -150,6 +151,15 @@ func TestCommandsAndRepliesValidateTypedCorrelation(t *testing.T) {
 	}
 	if err := (Command{Kind: CommandScroll, Item: key, Delta: 1, Orientation: "diagonal"}).Validate(); err == nil {
 		t.Fatal("invalid scroll orientation accepted")
+	}
+	if err := (Command{Kind: CommandTerminate, Item: key, X: 1}).Validate(); err == nil {
+		t.Fatal("terminate with a coordinate accepted")
+	}
+	if err := (Command{Kind: CommandTerminate, Item: key, MenuID: 3}).Validate(); err == nil {
+		t.Fatal("terminate with a menu field accepted")
+	}
+	if err := (Command{Kind: CommandTerminate}).Validate(); err == nil {
+		t.Fatal("terminate without an item accepted")
 	}
 	if err := (Reply{OK: true, Item: key, Output: 1}).Validate(); err != nil {
 		t.Fatal(err)

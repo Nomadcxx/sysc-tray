@@ -266,6 +266,8 @@ func dispatch(commands Commands, command protocol.Command) protocol.Reply {
 		_, err = commands.AboutToShow(command.Item, command.MenuRevision, command.MenuID)
 	case protocol.CommandMenuClose:
 		err = commands.MenuClose(command.Item, command.MenuRevision, command.MenuID)
+	case protocol.CommandTerminate:
+		err = commands.Terminate(command.Item)
 	default:
 		return failure(command, protocol.ErrorInvalid, fmt.Sprintf("unknown command %q", command.Kind))
 	}

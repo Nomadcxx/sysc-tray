@@ -142,6 +142,10 @@ func (p *Proxy) trigger() {
 	}
 }
 
+// Refresh asks for one more property read so the next published item carries
+// current capability flags. Safe from any goroutine.
+func (p *Proxy) Refresh() { p.trigger() }
+
 func (p *Proxy) loop(ctx context.Context) {
 	defer close(p.looped)
 	for {

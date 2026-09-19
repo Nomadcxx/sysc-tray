@@ -279,6 +279,15 @@ func (c Command) Validate() error {
 	}
 	switch c.Kind {
 	case CommandActivate, CommandSecondaryActivate, CommandMenuOpen, CommandMenuClose:
+	case CommandTerminate:
+		// Terminate names one item and nothing else: the service owns the
+		// process identity, so a shell-supplied coordinate or menu field is
+		// a protocol violation, not a hint.
+		if c.X != 0 || c.Y != 0 || c.Delta != 0 || c.MenuRevision != 0 ||
+			c.MenuID != 0 || c.Serial != 0 || len(c.Params) > 0 ||
+			c.Orientation != "" {
+			return errors.New("protocol: terminate carries only an item key")
+		}
 	case CommandScroll:
 		if c.Delta == 0 {
 			return errors.New("protocol: scroll delta is zero")

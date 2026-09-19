@@ -37,6 +37,7 @@ type Commands interface {
 	MenuSelect(key protocol.ItemKey, revision uint32, id int32, timestamp uint32) error
 	AboutToShow(key protocol.ItemKey, revision uint32, id int32) (bool, error)
 	MenuClose(key protocol.ItemKey, revision uint32, id int32) error
+	Terminate(key protocol.ItemKey) error
 }
 
 type Server struct {

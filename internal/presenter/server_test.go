@@ -413,6 +413,10 @@ func (c *recordingCommands) MenuClose(protocol.ItemKey, uint32, int32) error {
 	return c.record("menu-close")
 }
 
+func (c *recordingCommands) Terminate(protocol.ItemKey) error {
+	return c.record("terminate")
+}
+
 func itemKey(generation uint64) protocol.ItemKey {
 	return protocol.ItemKey{Owner: ":1.7", ObjectPath: "/StatusNotifierItem", Generation: generation}
 }

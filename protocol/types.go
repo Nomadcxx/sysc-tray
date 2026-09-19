@@ -109,6 +109,9 @@ type Item struct {
 	Tooltip       Tooltip  `json:"tooltip,omitempty"`
 	MenuPath      string   `json:"menu_path,omitempty"`
 	ItemIsMenu    bool     `json:"item_is_menu,omitempty"`
+	// CloseSupported is set only when the service established a same-UID
+	// process identity for the item's owner and can terminate it gracefully.
+	CloseSupported bool `json:"close_supported,omitempty"`
 }
 
 type Snapshot struct {
@@ -164,6 +167,7 @@ const (
 	CommandMenuSelect        CommandKind = "menu.select"
 	CommandAboutToShow       CommandKind = "menu.about-to-show"
 	CommandMenuClose         CommandKind = "menu.close"
+	CommandTerminate         CommandKind = "terminate"
 )
 
 type ScrollOrientation string

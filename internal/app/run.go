@@ -13,6 +13,7 @@ import (
 
 	"github.com/Nomadcxx/sysc-tray/internal/item"
 	"github.com/Nomadcxx/sysc-tray/internal/menu"
+	"github.com/Nomadcxx/sysc-tray/internal/ownership"
 	"github.com/Nomadcxx/sysc-tray/internal/presenter"
 	"github.com/Nomadcxx/sysc-tray/internal/state"
 	"github.com/Nomadcxx/sysc-tray/internal/watcher"
@@ -21,12 +22,45 @@ import (
 
 // worker holds the D-Bus readers for one item generation. The menu reader is
 // created only once the item advertises a menu path, and a menu failure leaves
-// the item's own commands working.
+// the item's own commands working. The ownership record is the process
+// identity behind the item's bus owner; a nil record means close is not
+// offered for this generation.
 type worker struct {
 	key      protocol.ItemKey
 	item     *item.Proxy
 	menu     *menu.Proxy
 	menuPath string
+
+	ownMu    sync.Mutex
+	own      ownership.Record
+	ownKnown bool
+}
+
+// closeable reports whether the recorded identity is a same-UID process the
+// service may terminate gracefully.
+func (w *worker) closeable() bool {
+	w.ownMu.Lock()
+	defer w.ownMu.Unlock()
+	return w.ownKnown && ownership.SameUser(w.own)
+}
+
+// reown re-inspects the item owner's identity and verifies it against the
+// recorded one. It returns the recorded record for signalling.
+func (w *worker) reown(conn *dbus.Conn) (ownership.Record, error) {
+	w.ownMu.Lock()
+	recorded, known := w.own, w.ownKnown
+	w.ownMu.Unlock()
+	if !known {
+		return ownership.Record{}, ownership.ErrUnavailable
+	}
+	current, err := ownership.Inspect(conn, w.key.Owner)
+	if err != nil {
+		return ownership.Record{}, err
+	}
+	if err := ownership.Verify(recorded, current); err != nil {
+		return ownership.Record{}, err
+	}
+	return recorded, nil
 }
 
 type App struct {
@@ -210,11 +244,37 @@ func (a *App) ItemAdded(key watcher.Key) {
 		a.mu.Unlock()
 		return
 	}
-	a.workers[itemKey] = &worker{key: itemKey, item: proxy}
+	w := &worker{key: itemKey, item: proxy}
+	a.workers[itemKey] = w
 	a.mu.Unlock()
+
+	// Establish the process identity off the registration path: a slow or
+	// failed inspection only decides whether Close is offered, never whether
+	// the item itself is usable.
+	go a.inspectOwnership(conn, w)
 
 	if err := proxy.Start(ctx); err != nil {
 		a.dropWorker(itemKey)
+	}
+}
+
+// inspectOwnership records the item owner's process identity once. The result
+// is stored on the worker; a failure leaves the record unknown and Close
+// unsupported for this generation.
+func (a *App) inspectOwnership(conn *dbus.Conn, w *worker) {
+	record, err := ownership.Inspect(conn, w.key.Owner)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.workers[w.key] != w || a.closing {
+		return
+	}
+	w.ownMu.Lock()
+	w.own, w.ownKnown = record, err == nil
+	w.ownMu.Unlock()
+	// The first publish may have raced this inspection; refresh once so the
+	// published item carries the CloseSupported capability deterministically.
+	if err == nil {
+		w.item.Refresh()
 	}
 }
 
@@ -243,14 +303,21 @@ func (a *App) dropWorker(key protocol.ItemKey) {
 // that appears or changes rebinds just the menu reader.
 func (a *App) onItem(result item.Result) {
 	if result.Err != nil {
-		a.dropWorker(result.Key)
+		// The pump delivers this from its own goroutine and then exits.
+		// Dropping the worker here would deadlock in Proxy.Close waiting
+		// for that same pump to finish (sysc-458).
+		go a.dropWorker(result.Key)
 		return
 	}
 	a.mu.Lock()
 	owner := a.owner
+	w := a.workers[result.Key]
 	a.mu.Unlock()
 	if owner == nil {
 		return
+	}
+	if w != nil && w.closeable() {
+		result.Item.CloseSupported = true
 	}
 	owner.Update(result.Key, result.Item)
 	a.bindMenu(result.Key, result.Item.MenuPath)
@@ -381,4 +448,53 @@ func (a *App) MenuClose(key protocol.ItemKey, revision uint32, id int32) error {
 		return err
 	}
 	return proxy.Closed(key, revision, id)
+}
+
+// TerminateWait bounds how long Terminate waits for a signalled process to
+// leave. ponytail: one flat window; a per-application grace policy would need
+// a measured requirement first.
+var TerminateWait = 3 * time.Second
+
+// TerminatePoll is the /proc recheck interval inside the bounded wait.
+var TerminatePoll = 100 * time.Millisecond
+
+// Terminate gracefully ends the process behind one owned tray item. Every
+// identity check runs at operation time: a stale generation, a replaced
+// owner, a recycled PID, or a cross-UID process is rejected before any
+// signal. The bounded wait returns busy when the process ignores the
+// request; the item then stays visible and nothing escalates.
+func (a *App) Terminate(key protocol.ItemKey) error {
+	a.mu.Lock()
+	conn, closing := a.conn, a.closing
+	w := a.workers[key]
+	a.mu.Unlock()
+	if closing || conn == nil {
+		return &protocol.ProtocolError{Code: protocol.ErrorUnavailable, Message: "service is closing"}
+	}
+	if w == nil {
+		return &protocol.ProtocolError{Code: protocol.ErrorStaleItem, Message: "no such item generation"}
+	}
+	record, err := w.reown(conn)
+	if err != nil {
+		return &protocol.ProtocolError{Code: protocol.ErrorInvalid, Message: err.Error()}
+	}
+	if !ownership.SameUser(record) {
+		return &protocol.ProtocolError{Code: protocol.ErrorInvalid, Message: "item owner is not the service user"}
+	}
+	if err := ownership.Signal(record); err != nil {
+		return &protocol.ProtocolError{Code: protocol.ErrorUnavailable, Message: "termination request failed"}
+	}
+	// The dispatch runs on the connection goroutine, so this wait delays the
+	// shell's next commands by at most TerminateWait. Acceptable for a rare
+	// Close action; an async reply would need a reply-queue redesign.
+	deadline := time.Now().Add(TerminateWait)
+	for {
+		if !ownership.Alive(record) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return &protocol.ProtocolError{Code: protocol.ErrorBusy, Message: "process did not exit in time"}
+		}
+		time.Sleep(TerminatePoll)
+	}
 }
