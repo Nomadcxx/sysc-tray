@@ -63,7 +63,7 @@ func TestServerResolvesServiceNamesAndRejectsMalformedRegistrations(t *testing.T
 	}
 }
 
-func TestServerReplacesOwnerGenerationBeforeAdding(t *testing.T) {
+func TestServerIgnoresDuplicateRegistration(t *testing.T) {
 	conn := privateConn(t)
 	observer := newRecorder()
 	server := NewServer(conn, observer)
@@ -77,16 +77,18 @@ func TestServerReplacesOwnerGenerationBeforeAdding(t *testing.T) {
 	first := observer.awaitAdded(t)
 	registerItem(t, item, string(DefaultItemPath))
 
-	removed := observer.awaitRemoved(t)
-	if removed != first {
-		t.Fatalf("removed key = %+v, want %+v", removed, first)
+	select {
+	case removed := <-observer.removed:
+		t.Fatalf("duplicate registration removed %+v", removed)
+	default:
 	}
-	second := observer.awaitAdded(t)
-	if second.Generation <= first.Generation {
-		t.Fatalf("replacement generation %d does not follow %d", second.Generation, first.Generation)
+	select {
+	case added := <-observer.added:
+		t.Fatalf("duplicate registration added %+v", added)
+	default:
 	}
-	if got := registeredItems(t, conn); len(got) != 1 {
-		t.Fatalf("RegisteredStatusNotifierItems = %v, want one entry", got)
+	if got := server.Items(); len(got) != 1 || got[0] != first {
+		t.Fatalf("items after duplicate registration = %+v, want [%+v]", got, first)
 	}
 }
 
