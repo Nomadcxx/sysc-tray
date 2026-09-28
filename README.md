@@ -48,7 +48,6 @@ The integration suite runs the daemon against fake applications on a private bus
 forms, owner replacement, icons and pixmaps, tooltips, pointer commands, menu revisions, submenus, and
 stale-revision refusal.
 
-See the [design](docs/plans/2026-08-27-sysc-tray-design.md) and [roadmap](docs/roadmap.md).
 
 ## Licence
 
