@@ -31,7 +31,6 @@ cross-platform abstractions are outside scope.
 4. Implement the DBusMenu client and shell-owned menu presentation.
 5. Qualify representative applications and restart sequences before `v0.1.0`.
 
-See the [design](docs/plans/2026-08-27-sysc-tray-design.md) and [roadmap](docs/roadmap.md).
 Package directories will arrive with their first tested behavior.
 
 ## Licence
