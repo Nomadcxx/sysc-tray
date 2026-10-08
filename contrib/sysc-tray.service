@@ -1,0 +1,26 @@
+# Hand-install copy. The copy the installer renders lives in the sysc repo at
+# internal/units/templates/sysc-tray.service; if they diverge, that one wins.
+# Install with: systemctl --user link ~/.local/share/systemd/user/sysc-tray.service
+#   (or copy it there) then: systemctl --user enable --now sysc-tray.service
+[Unit]
+Description=sysc-tray StatusNotifierItem host
+Documentation=https://github.com/Nomadcxx/sysc-tray
+
+Requisite=graphical-session.target
+After=graphical-session.target
+PartOf=graphical-session.target
+
+# A tray that cannot stay up should stop trying and leave the session usable
+# rather than respawn forever.
+StartLimitIntervalSec=30
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/sysc-tray
+Restart=on-failure
+RestartSec=2
+Slice=session.slice
+
+[Install]
+WantedBy=graphical-session.target
