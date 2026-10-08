@@ -4,17 +4,40 @@
 and D-Bus interaction, then sends renderer-neutral item and menu state to
 [`sysc-shell`](https://github.com/Nomadcxx/sysc-shell).
 
-## Running
+## Quick Links
+
+- [Releases](https://github.com/Nomadcxx/sysc-tray/releases)
+- [Contributing](https://github.com/Nomadcxx/sysc-tray/issues)
+- [`sysc-shell`](https://github.com/Nomadcxx/sysc-shell) — the shell that draws the tray
+- [`sysc`](https://github.com/Nomadcxx/sysc) — the installer that wires the session together
+
+## Installation
+
+### Requirements
+
+Linux with a session bus and `XDG_RUNTIME_DIR`. Go 1.26 to build from source.
+
+### From source
 
 ```bash
-go build ./cmd/sysc-tray
-./sysc-tray
+go build -trimpath -o ~/.local/bin/sysc-tray ./cmd/sysc-tray
 ```
 
-The daemon needs a session bus and `XDG_RUNTIME_DIR`. It serves one presenter at
-`$XDG_RUNTIME_DIR/sysc-tray/presenter.v1.sock`, owned by the calling user with mode `0600`. SIGINT and
-SIGTERM shut it down: it stops accepting presenters, stops the per-item readers, releases the watcher
-relationship, closes the bus, and removes its socket.
+### As a user service
+
+```bash
+cp contrib/sysc-tray.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now sysc-tray.service
+```
+
+`sysc install` does the same thing and hands the tray over from an existing provider.
+
+## Usage
+
+The daemon serves one presenter at `$XDG_RUNTIME_DIR/sysc-tray/presenter.v1.sock`, owned by the
+calling user with mode `0600`. SIGINT and SIGTERM shut it down: it stops accepting presenters, stops
+the per-item readers, releases the watcher relationship, closes the bus, and removes its socket.
 
 ## Responsibilities
 
@@ -48,7 +71,19 @@ The integration suite runs the daemon against fake applications on a private bus
 forms, owner replacement, icons and pixmaps, tooltips, pointer commands, menu revisions, submenus, and
 stale-revision refusal.
 
+## Ecosystem
 
-## Licence
+- [`sysc`](https://github.com/Nomadcxx/sysc) — the installer for the session
+- [`sysc-shell`](https://github.com/Nomadcxx/sysc-shell) — the renderer that presents tray state
+- [`sysc-notify`](https://github.com/Nomadcxx/sysc-notify) — the sibling notification service
+
+## Documentation
+
+- [The sysc ecosystem](https://github.com/Nomadcxx/sysc-shell/blob/main/docs/ecosystem.md)
+
+Design plans and roadmaps are kept out of the repository on purpose; they live as local files under
+`docs/plans/` and `docs/roadmap.md`.
+
+## License
 
 `sysc-tray` uses the [BSD 3-Clause License](LICENSE).
