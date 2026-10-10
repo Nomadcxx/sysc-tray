@@ -1,4 +1,9 @@
-# sysc-tray
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/wordmark.png">
+    <img src="assets/wordmark-light.png" alt="sysc-tray" height="64">
+  </picture>
+</p>
 
 `sysc-tray` is a Go StatusNotifierItem and DBusMenu service for Linux desktops. It owns tray discovery
 and D-Bus interaction, then sends renderer-neutral item and menu state to
@@ -6,6 +11,7 @@ and D-Bus interaction, then sends renderer-neutral item and menu state to
 
 ## Quick Links
 
+- [Documentation site](https://nomadcxx.github.io/sysc/docs/components/sysc-tray/)
 - [Releases](https://github.com/Nomadcxx/sysc-tray/releases)
 - [Contributing](https://github.com/Nomadcxx/sysc-tray/issues)
 - [`sysc-shell`](https://github.com/Nomadcxx/sysc-shell) — the shell that draws the tray
