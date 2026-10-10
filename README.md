@@ -23,13 +23,32 @@ and D-Bus interaction, then sends renderer-neutral item and menu state to
 
 Linux with a session bus and `XDG_RUNTIME_DIR`. Go 1.26 to build from source.
 
+### Guided installer (recommended)
+
+Use the [SYSC Go installer](https://github.com/Nomadcxx/sysc#install) to set up
+the shell, its companions and your Niri session together.
+
+### AUR
+
+On Arch, install [sysc-tray](https://aur.archlinux.org/packages/sysc-tray) with
+your AUR helper:
+
+```sh
+yay -S sysc-tray
+systemctl --user enable --now sysc-tray.service
+```
+
+Run the service command inside a Niri session started with `niri-session`.
+
+[Documentation](https://nomadcxx.github.io/sysc/docs/).
+
 ### From source
 
 ```bash
 go build -trimpath -o ~/.local/bin/sysc-tray ./cmd/sysc-tray
 ```
 
-### As a user service
+### Source builds: user service
 
 ```bash
 cp contrib/sysc-tray.service ~/.config/systemd/user/
