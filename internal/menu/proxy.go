@@ -5,10 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/godbus/dbus/v5"
 
 	"github.com/Nomadcxx/sysc-tray/protocol"
+)
+
+const (
+	refreshCallTimeout = 250 * time.Millisecond
+	commandCallTimeout = 500 * time.Millisecond
 )
 
 // Update is one published menu tree for an item generation. A non-nil error
@@ -36,6 +42,8 @@ type Proxy struct {
 	looped  chan struct{}
 	once    sync.Once
 	started bool
+	callCtx context.Context
+	cancel  context.CancelFunc
 
 	mu       sync.RWMutex
 	revision uint32
@@ -67,15 +75,19 @@ func (p *Proxy) Start(ctx context.Context) error {
 		}
 	}
 	p.conn.Signal(p.signals)
+	p.callCtx, p.cancel = context.WithCancel(ctx)
 	p.started = true
 	go p.pump()
-	go p.loop(ctx)
+	go p.loop(p.callCtx)
 	p.trigger()
 	return nil
 }
 
 func (p *Proxy) Close() {
 	p.once.Do(func() {
+		if p.cancel != nil {
+			p.cancel()
+		}
 		close(p.stop)
 		if !p.started {
 			return
@@ -190,6 +202,9 @@ func (p *Proxy) loop(ctx context.Context) {
 func (p *Proxy) refresh() {
 	revision, layout, err := p.getLayout()
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		p.publish(Update{Key: p.key, Err: err})
 		return
 	}
@@ -209,7 +224,7 @@ func (p *Proxy) refresh() {
 }
 
 func (p *Proxy) getLayout() (uint32, any, error) {
-	call := p.object().Call(Interface+".GetLayout", 0, int32(0), int32(-1), []string{})
+	call := p.call(refreshCallTimeout, Interface+".GetLayout", int32(0), int32(-1), []string{})
 	if call.Err != nil {
 		return 0, nil, fmt.Errorf("menu: read layout from %s: %w", p.key.Owner, call.Err)
 	}
@@ -242,7 +257,7 @@ func (p *Proxy) event(key protocol.ItemKey, revision uint32, id int32, name stri
 	if err := p.check(key, revision); err != nil {
 		return err
 	}
-	call := p.object().Call(Interface+".Event", 0, id, name, dbus.MakeVariant(""), timestamp)
+	call := p.call(commandCallTimeout, Interface+".Event", id, name, dbus.MakeVariant(""), timestamp)
 	if call.Err != nil {
 		return &protocol.ProtocolError{Code: protocol.ErrorUnavailable, Message: call.Err.Error()}
 	}
@@ -255,7 +270,7 @@ func (p *Proxy) AboutToShow(key protocol.ItemKey, revision uint32, id int32) (bo
 	if err := p.check(key, revision); err != nil {
 		return false, err
 	}
-	call := p.object().Call(Interface+".AboutToShow", 0, id)
+	call := p.call(refreshCallTimeout, Interface+".AboutToShow", id)
 	if call.Err != nil {
 		return false, &protocol.ProtocolError{Code: protocol.ErrorUnavailable, Message: call.Err.Error()}
 	}
@@ -290,4 +305,14 @@ func (p *Proxy) check(key protocol.ItemKey, revision uint32) error {
 
 func (p *Proxy) object() dbus.BusObject {
 	return p.conn.Object(p.key.Owner, p.path)
+}
+
+func (p *Proxy) call(timeout time.Duration, method string, args ...any) *dbus.Call {
+	ctx := p.callCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	callCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return p.object().CallWithContext(callCtx, method, 0, args...)
 }
