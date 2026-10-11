@@ -257,9 +257,14 @@ type fakeItem struct {
 	key   protocol.ItemKey
 	count atomic.Int64
 
-	mu       sync.Mutex
-	props    map[string]dbus.Variant
-	recorded []string
+	mu           sync.Mutex
+	props        map[string]dbus.Variant
+	recorded     []string
+	blockReads   <-chan struct{}
+	blockReadOn  int64
+	readStarted  chan struct{}
+	blockCalls   <-chan struct{}
+	blockStarted chan struct{}
 }
 
 func exportFakeItem(t *testing.T, host *dbus.Conn, props map[string]dbus.Variant) *fakeItem {
@@ -300,7 +305,14 @@ func (f *fakeItem) Get(iface, name string) (dbus.Variant, *dbus.Error) {
 }
 
 func (f *fakeItem) GetAll(iface string) (map[string]dbus.Variant, *dbus.Error) {
-	f.count.Add(1)
+	read := f.count.Add(1)
+	f.mu.Lock()
+	blocked, blockOn, started := f.blockReads, f.blockReadOn, f.readStarted
+	f.mu.Unlock()
+	if read == blockOn && blocked != nil {
+		started <- struct{}{}
+		<-blocked
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	copied := make(map[string]dbus.Variant, len(f.props))
@@ -399,6 +411,115 @@ func TestProxyInvokesItemCommandsAndRefusesStaleGenerations(t *testing.T) {
 	}
 }
 
+func TestProxyBoundsSlowItemActionsAndKeepsOtherItemsAvailable(t *testing.T) {
+	host := privateConn(t)
+	blocked := make(chan struct{})
+	defer close(blocked)
+	first := exportFakeItem(t, host, minimalProps())
+	first.mu.Lock()
+	first.blockCalls = blocked
+	first.blockStarted = make(chan struct{}, 1)
+	first.mu.Unlock()
+	first.exportMethods(t)
+	second := exportFakeItem(t, host, minimalProps())
+	second.exportMethods(t)
+
+	firstResults := make(chan Result, 8)
+	firstProxy := start(t, host, first.key, firstResults)
+	defer firstProxy.Close()
+	awaitResult(t, firstResults)
+	secondResults := make(chan Result, 8)
+	secondProxy := start(t, host, second.key, secondResults)
+	defer secondProxy.Close()
+	awaitResult(t, secondResults)
+
+	callDone := make(chan error, 1)
+	go func() { callDone <- firstProxy.Activate(first.key, 1, 2) }()
+	select {
+	case <-first.blockStarted:
+	case <-time.After(time.Second):
+		t.Fatal("slow Activate was not called")
+	}
+	select {
+	case err := <-callDone:
+		if err == nil {
+			t.Fatal("slow Activate unexpectedly succeeded")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("slow Activate blocked past its call budget")
+	}
+
+	if err := secondProxy.Activate(second.key, 3, 4); err != nil {
+		t.Fatalf("independent item action failed after timeout: %v", err)
+	}
+}
+
+func TestProxyRetriesRefreshAfterTimeout(t *testing.T) {
+	host := privateConn(t)
+	fake := exportFakeItem(t, host, minimalProps())
+	results := make(chan Result, 8)
+	proxy := start(t, host, fake.key, results)
+	awaitResult(t, results)
+
+	blocked := make(chan struct{})
+	fake.mu.Lock()
+	fake.blockReads = blocked
+	fake.blockReadOn = fake.reads() + 1
+	fake.readStarted = make(chan struct{}, 1)
+	fake.mu.Unlock()
+	defer func() {
+		close(blocked)
+		proxy.Close()
+	}()
+	fake.emit(t, "NewTitle")
+	select {
+	case <-fake.readStarted:
+	case <-time.After(time.Second):
+		t.Fatal("blocked property read was not called")
+	}
+
+	result := awaitResult(t, results)
+	if result.Item.Key != fake.key {
+		t.Fatalf("retried item key = %+v, want %+v", result.Item.Key, fake.key)
+	}
+	if fake.reads() < 3 {
+		t.Fatalf("property reads = %d, want a retry after the timed-out read", fake.reads())
+	}
+}
+
+func TestProxyCloseCancelsInFlightRefresh(t *testing.T) {
+	host := privateConn(t)
+	fake := exportFakeItem(t, host, minimalProps())
+	blocked := make(chan struct{})
+	fake.mu.Lock()
+	fake.blockReads = blocked
+	fake.blockReadOn = 1
+	fake.readStarted = make(chan struct{}, 1)
+	fake.mu.Unlock()
+	results := make(chan Result, 8)
+	proxy := start(t, host, fake.key, results)
+	defer func() {
+		close(blocked)
+		proxy.Close()
+	}()
+	select {
+	case <-fake.readStarted:
+	case <-time.After(time.Second):
+		t.Fatal("blocked property read was not called")
+	}
+
+	closeDone := make(chan struct{})
+	go func() {
+		proxy.Close()
+		close(closeDone)
+	}()
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("closing the proxy waited for the blocked property read")
+	}
+}
+
 func (f *fakeItem) exportMethods(t *testing.T) {
 	t.Helper()
 	if err := f.conn.Export(methods{fake: f}, dbus.ObjectPath(f.key.ObjectPath), ItemInterface); err != nil {
@@ -412,6 +533,7 @@ type methods struct {
 
 func (m methods) Activate(x, y int32) *dbus.Error {
 	m.fake.record(fmt.Sprintf("Activate(%d,%d)", x, y))
+	m.fake.waitForBlockedAction()
 	return nil
 }
 
@@ -435,4 +557,14 @@ func (f *fakeItem) calls() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.recorded...)
+}
+
+func (f *fakeItem) waitForBlockedAction() {
+	f.mu.Lock()
+	blocked, started := f.blockCalls, f.blockStarted
+	f.mu.Unlock()
+	if blocked != nil {
+		started <- struct{}{}
+		<-blocked
+	}
 }

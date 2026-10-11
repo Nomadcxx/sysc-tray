@@ -116,6 +116,100 @@ func TestProxyRefreshesWhenAboutToShowRequestsIt(t *testing.T) {
 	}
 }
 
+func TestProxyBoundsSlowAboutToShowAndKeepsOtherItemsAvailable(t *testing.T) {
+	host := privateConn(t)
+	owner := privateConn(t)
+	blocked := &blockedMenu{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	t.Cleanup(func() { close(blocked.release) })
+	key := protocol.ItemKey{Owner: owner.Names()[0], ObjectPath: "/Item", Generation: 1}
+	if err := owner.Export(blocked, dbus.ObjectPath("/Menu"), Interface); err != nil {
+		t.Fatal(err)
+	}
+	updates := make(chan Update, 8)
+	proxy := NewProxy(host, key, "/Menu", func(update Update) { updates <- update })
+	if err := proxy.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer proxy.Close()
+	awaitUpdate(t, updates)
+
+	fast := exportFakeMenu(t, host, 1, node(0, nil))
+	fastProxy := start(t, host, fast, updates)
+	defer fastProxy.Close()
+	awaitUpdate(t, updates)
+
+	callDone := make(chan error, 1)
+	go func() {
+		_, err := proxy.AboutToShow(key, 1, 0)
+		callDone <- err
+	}()
+	select {
+	case <-blocked.entered:
+	case <-time.After(time.Second):
+		t.Fatal("slow AboutToShow was not called")
+	}
+	select {
+	case err := <-callDone:
+		if err == nil {
+			t.Fatal("slow AboutToShow unexpectedly succeeded")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("slow AboutToShow blocked past its call budget")
+	}
+
+	if _, err := fastProxy.AboutToShow(fast.key, 1, 0); err != nil {
+		t.Fatalf("independent item command failed after timeout: %v", err)
+	}
+}
+
+func TestProxyCloseCancelsInFlightAboutToShow(t *testing.T) {
+	host := privateConn(t)
+	owner := privateConn(t)
+	blocked := &blockedMenu{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	t.Cleanup(func() { close(blocked.release) })
+	key := protocol.ItemKey{Owner: owner.Names()[0], ObjectPath: "/Item", Generation: 1}
+	if err := owner.Export(blocked, dbus.ObjectPath("/Menu"), Interface); err != nil {
+		t.Fatal(err)
+	}
+	updates := make(chan Update, 8)
+	proxy := NewProxy(host, key, "/Menu", func(update Update) { updates <- update })
+	if err := proxy.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer proxy.Close()
+	awaitUpdate(t, updates)
+
+	callDone := make(chan error, 1)
+	go func() {
+		_, err := proxy.AboutToShow(key, 1, 0)
+		callDone <- err
+	}()
+	select {
+	case <-blocked.entered:
+	case <-time.After(time.Second):
+		t.Fatal("slow AboutToShow was not called")
+	}
+
+	closeDone := make(chan struct{})
+	go func() {
+		proxy.Close()
+		close(closeDone)
+	}()
+	select {
+	case err := <-callDone:
+		if err == nil {
+			t.Fatal("canceled AboutToShow unexpectedly succeeded")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("closing the proxy did not cancel AboutToShow")
+	}
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("proxy close waited for the blocked peer")
+	}
+}
+
 func TestProxyRefusesStaleSelectionWithoutInvoking(t *testing.T) {
 	conn := privateConn(t)
 	fake := exportFakeMenu(t, conn, 9, node(0, nil, node(1, props("label", "Open"))))
@@ -280,6 +374,21 @@ type fakeMenu struct {
 	reads      int
 	needUpdate bool
 	failing    bool
+}
+
+type blockedMenu struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (*blockedMenu) GetLayout(int32, int32, []string) (uint32, layoutNode, *dbus.Error) {
+	return 1, node(0, nil), nil
+}
+
+func (m *blockedMenu) AboutToShow(int32) (bool, *dbus.Error) {
+	m.entered <- struct{}{}
+	<-m.release
+	return false, nil
 }
 
 func exportFakeMenu(t *testing.T, host *dbus.Conn, revision uint32, root layoutNode) *fakeMenu {

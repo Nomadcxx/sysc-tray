@@ -12,6 +12,11 @@ import (
 	"github.com/Nomadcxx/sysc-tray/protocol"
 )
 
+const (
+	refreshCallTimeout = time.Second
+	commandCallTimeout = 500 * time.Millisecond
+)
+
 // Result is one completed refresh for a generation. A non-nil error means the
 // item is gone; the state owner drops only that item.
 type Result struct {
@@ -36,6 +41,8 @@ type Proxy struct {
 	looped  chan struct{}
 	once    sync.Once
 	started bool
+	callCtx context.Context
+	cancel  context.CancelFunc
 }
 
 func NewProxy(conn *dbus.Conn, key protocol.ItemKey, limiter *Limiter, publish func(Result)) *Proxy {
@@ -61,15 +68,19 @@ func (p *Proxy) Start(ctx context.Context) error {
 		}
 	}
 	p.conn.Signal(p.signals)
+	p.callCtx, p.cancel = context.WithCancel(ctx)
 	p.started = true
 	go p.pump()
-	go p.loop(ctx)
+	go p.loop(p.callCtx)
 	p.trigger()
 	return nil
 }
 
 func (p *Proxy) Close() {
 	p.once.Do(func() {
+		if p.cancel != nil {
+			p.cancel()
+		}
 		close(p.stop)
 		if !p.started {
 			return
@@ -186,8 +197,19 @@ func (p *Proxy) await(ctx context.Context) bool {
 func (p *Proxy) refresh() {
 	var props map[string]dbus.Variant
 	object := p.conn.Object(p.key.Owner, dbus.ObjectPath(p.key.ObjectPath))
-	call := object.Call("org.freedesktop.DBus.Properties.GetAll", 0, ItemInterface)
+	call := p.call(object, refreshCallTimeout, "org.freedesktop.DBus.Properties.GetAll", ItemInterface)
 	if call.Err != nil {
+		if errors.Is(call.Err, context.Canceled) {
+			return
+		}
+		if errors.Is(call.Err, context.DeadlineExceeded) {
+			// A slow item may recover; keep its last state and retry through the refresh limiter.
+			// ponytail: one timed-out item retries at most once per second; tune backoff from measured load.
+			if p.callCtx.Err() == nil {
+				p.trigger()
+			}
+			return
+		}
 		p.publish(Result{Key: p.key, Err: fmt.Errorf("item: read %s: %w", p.key.Owner, call.Err)})
 		return
 	}
@@ -229,8 +251,18 @@ func (p *Proxy) invoke(key protocol.ItemKey, member string, args ...any) error {
 		return &protocol.ProtocolError{Code: protocol.ErrorStaleItem, Message: "item generation changed"}
 	}
 	object := p.conn.Object(p.key.Owner, dbus.ObjectPath(p.key.ObjectPath))
-	if call := object.Call(ItemInterface+"."+member, 0, args...); call.Err != nil {
+	if call := p.call(object, commandCallTimeout, ItemInterface+"."+member, args...); call.Err != nil {
 		return &protocol.ProtocolError{Code: protocol.ErrorUnavailable, Message: call.Err.Error()}
 	}
 	return nil
+}
+
+func (p *Proxy) call(object dbus.BusObject, timeout time.Duration, method string, args ...any) *dbus.Call {
+	ctx := p.callCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	callCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return object.CallWithContext(callCtx, method, 0, args...)
 }
