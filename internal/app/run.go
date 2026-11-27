@@ -191,11 +191,15 @@ func (a *App) unwind() error {
 	if cancel != nil {
 		cancel()
 	}
-	if ended != nil {
-		<-ended
-	}
+	// Close the bus before waiting for the watcher. Its calls now carry the
+	// cancelled context, and closing the connection is the final guarantee
+	// that a call stuck in an unresponsive peer releases the goroutine.
 	if conn != nil {
 		result = errors.Join(result, conn.Close())
+		conn = nil
+	}
+	if ended != nil {
+		<-ended
 	}
 	if owner != nil {
 		result = errors.Join(result, owner.Close())

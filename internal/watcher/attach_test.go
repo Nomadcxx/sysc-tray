@@ -2,6 +2,8 @@ package watcher
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -105,4 +107,52 @@ func awaitMode(t *testing.T, w *Watcher, want Mode) {
 
 func isCancellation(err error) bool {
 	return err == context.Canceled || err == context.DeadlineExceeded
+}
+
+// stalledWatcher accepts the host registration and never answers it. The
+// context has to release the call, or the watcher goroutine — and service
+// shutdown with it — waits forever (#12).
+type stalledWatcher struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *stalledWatcher) RegisterStatusNotifierHost(string) *dbus.Error {
+	s.once.Do(func() { close(s.entered) })
+	<-s.release
+	return nil
+}
+
+func TestAttachReturnsWhenAnExternalWatcherNeverReplies(t *testing.T) {
+	conn := privateConn(t)
+	stalled := &stalledWatcher{entered: make(chan struct{}), release: make(chan struct{})}
+	if err := conn.Export(stalled, ObjectPath, Interface); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.RequestName(BusName, dbus.NameFlagDoNotQueue); err != nil {
+		t.Fatal(err)
+	}
+
+	client := newClient(privateConn(t), newRecorder())
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := client.attach(ctx)
+	elapsed := time.Since(start)
+	close(stalled.release)
+	client.close()
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("attach() error = %v, want the context deadline", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("attach() took %v with an unresponsive watcher", elapsed)
+	}
+	select {
+	case <-stalled.entered:
+	default:
+		t.Fatal("the stalled watcher was never called")
+	}
 }
