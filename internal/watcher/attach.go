@@ -103,7 +103,7 @@ func (w *Watcher) serveOnce(ctx context.Context) (bool, error) {
 	}
 
 	client := newClient(w.conn, w.observer)
-	if err := client.attach(); err != nil {
+	if err := client.attach(ctx); err != nil {
 		client.close()
 		return false, err
 	}
@@ -158,7 +158,7 @@ func newClient(conn *dbus.Conn, observer Observer) *client {
 
 func (c *client) lost() <-chan struct{} { return c.gone }
 
-func (c *client) attach() error {
+func (c *client) attach(ctx context.Context) error {
 	owner, err := busNameOwner(c.conn)(BusName)
 	if err != nil {
 		return fmt.Errorf("watcher: no external watcher: %w", err)
@@ -178,11 +178,12 @@ func (c *client) attach() error {
 	go c.pump()
 
 	object := c.conn.Object(BusName, ObjectPath)
-	if call := object.Call(Interface+".RegisterStatusNotifierHost", 0, HostName(c.conn)); call.Err != nil {
+	if call := object.CallWithContext(ctx, Interface+".RegisterStatusNotifierHost", 0, HostName(c.conn)); call.Err != nil {
 		return fmt.Errorf("watcher: register host with %s: %w", owner, call.Err)
 	}
-	variant, err := object.GetProperty(Interface + ".RegisteredStatusNotifierItems")
-	if err != nil {
+	var variant dbus.Variant
+	call := object.CallWithContext(ctx, "org.freedesktop.DBus.Properties.Get", 0, Interface, "RegisteredStatusNotifierItems")
+	if err := call.Store(&variant); err != nil {
 		return fmt.Errorf("watcher: read registered items: %w", err)
 	}
 	entries, _ := variant.Value().([]string)
