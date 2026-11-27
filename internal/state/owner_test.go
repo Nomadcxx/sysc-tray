@@ -337,3 +337,86 @@ func TestUpdateWithNoChangePublishesNothing(t *testing.T) {
 		t.Fatalf("a real change published %d envelopes, want one", got-after)
 	}
 }
+
+func bigItem(key protocol.ItemKey, title string) protocol.Item {
+	return protocol.Item{
+		Key: key, ID: "big", Title: title,
+		Category: protocol.CategoryApplicationStatus, Status: protocol.StatusActive,
+		Icon: protocol.Icon{Pixmaps: []protocol.Pixmap{
+			{Width: 512, Height: 512, ARGB: make([]byte, 512*512*4)},
+			{Width: 512, Height: 512, ARGB: make([]byte, 512*512*4)},
+		}},
+	}
+}
+
+// TestUpdateKeepsTheAggregatePixmapBudget covers the live-state half of #11:
+// four 2 MiB items fit, and the fifth must not become publishable state that
+// every future snapshot would reject.
+func TestUpdateKeepsTheAggregatePixmapBudget(t *testing.T) {
+	owner := Start()
+	defer func() { _ = owner.Close() }()
+
+	keys := make([]protocol.ItemKey, 5)
+	for i := range keys {
+		keys[i] = itemKey(uint64(i + 1))
+		keys[i].ObjectPath = fmt.Sprintf("/StatusNotifierItem/%d", i+1)
+		owner.Add(keys[i])
+	}
+	for _, key := range keys[:4] {
+		owner.Update(key, bigItem(key, "Fits"))
+	}
+	owner.Update(keys[4], bigItem(keys[4], "Overflow"))
+
+	snapshot := owner.Snapshot()
+	if len(snapshot.Items) != 4 {
+		t.Fatalf("snapshot holds %d items, want 4 inside the aggregate budget", len(snapshot.Items))
+	}
+	if err := snapshot.Validate(); err != nil {
+		t.Fatalf("stored state is not publishable: %v", err)
+	}
+
+	// Replacing items with smaller ones frees budget for a later update.
+	owner.Update(keys[0], sample(keys[0], "Small"))
+	owner.Update(keys[1], sample(keys[1], "Small"))
+	owner.Update(keys[4], bigItem(keys[4], "Now fits"))
+	if got := len(owner.Snapshot().Items); got != 5 {
+		t.Fatalf("snapshot holds %d items after freeing pixmap budget, want 5", got)
+	}
+}
+
+// TestAttachRejectsInvalidSnapshotWithoutDroppingPresenter covers the attach
+// half of #11: a rejected attachment must leave the previous sink installed.
+func TestAttachRejectsInvalidSnapshotWithoutDroppingPresenter(t *testing.T) {
+	owner := Start()
+	defer func() { _ = owner.Close() }()
+	sink := attach(t, owner)
+
+	key := itemKey(1)
+	owner.Add(key)
+	owner.Update(key, sample(key, "Small"))
+	sink.await(t)
+
+	extra := itemKey(10)
+	extra.ObjectPath = "/StatusNotifierItem/extra/0"
+	owner.submit(func() {
+		for i := 0; i < 4; i++ {
+			key := extra
+			key.Generation = uint64(10 + i)
+			key.ObjectPath = fmt.Sprintf("/StatusNotifierItem/extra/%d", i)
+			owner.items[address{owner: key.Owner, path: key.ObjectPath}] = &entry{
+				key: key, item: bigItem(key, "Big"), hasItem: true, published: true,
+			}
+			owner.order = append(owner.order, address{owner: key.Owner, path: key.ObjectPath})
+		}
+	})
+	if _, err := owner.Attach(&recordingSink{envelopes: make(chan protocol.Envelope, 1)}); err == nil {
+		t.Fatal("Attach() accepted a snapshot over the aggregate pixmap budget")
+	}
+
+	// The original presenter must still receive the next valid delta.
+	owner.Update(extra, sample(extra, "Shrunk"))
+	envelope := sink.await(t)
+	if envelope.Kind != protocol.KindItemAdded && envelope.Kind != protocol.KindItemChanged {
+		t.Fatalf("original presenter received %q after a rejected attachment", envelope.Kind)
+	}
+}

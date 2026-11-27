@@ -151,6 +151,11 @@ func (i Item) Validate() error {
 	return nil
 }
 
+// PixmapBytes reports the total ARGB bytes carried by an item's icon sets.
+func (i Item) PixmapBytes() (uint64, error) {
+	return i.pixmapBytes()
+}
+
 func (i Item) pixmapBytes() (uint64, error) {
 	var total uint64
 	for _, set := range [][]Pixmap{i.Icon.Pixmaps, i.AttentionIcon.Pixmaps, i.OverlayIcon.Pixmaps, i.Tooltip.Pixmaps} {
