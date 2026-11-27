@@ -54,6 +54,10 @@ type Server struct {
 	nextGen    uint64
 	started    bool
 
+	// afterSinkAttach is a test hook that runs while a handshake owns the
+	// publication lock. Production leaves it nil.
+	afterSinkAttach func()
+
 	stop      chan struct{}
 	done      chan error
 	closeOnce sync.Once
@@ -178,17 +182,25 @@ func (s *Server) handle(socket *net.UnixConn) {
 		return
 	}
 
+	// Publishing a presenter is one atomic step: assign its generation,
+	// install its sink, start its stream, and make it current. Handlers that
+	// overlap must not interleave those operations, or an older handshake can
+	// finish last, make itself current, and then have the newer presenter
+	// detach the sink it owns.
 	s.mu.Lock()
 	s.nextGen++
 	c.generation = s.nextGen
 	owner, commands := s.owner, s.commands
-	s.mu.Unlock()
 
 	// Attaching installs the sink and captures the baseline in one step on the
 	// state goroutine, so no delta can slip between the snapshot and the stream.
 	snapshot, err := owner.Attach(c)
 	if err != nil || snapshot.Validate() != nil {
+		s.mu.Unlock()
 		return
+	}
+	if s.afterSinkAttach != nil {
+		s.afterSinkAttach()
 	}
 	serviceHello := protocol.Hello{
 		Major: protocol.ProtocolMajor, Minor: protocol.ProtocolMinor, Role: protocol.RolePresenter,
@@ -197,21 +209,24 @@ func (s *Server) handle(socket *net.UnixConn) {
 	helloFrame, err := marshalEnvelope(protocol.Envelope{Kind: protocol.KindHello}, serviceHello)
 	if err != nil {
 		owner.Detach(c)
+		s.mu.Unlock()
 		return
 	}
 	snapshotFrame, err := marshalEnvelope(
 		protocol.Envelope{Kind: protocol.KindSnapshot, Sequence: snapshot.Sequence}, snapshot)
 	if err != nil {
 		owner.Detach(c)
+		s.mu.Unlock()
 		return
 	}
 	if err := c.start(snapshot.Sequence, helloFrame, snapshotFrame); err != nil {
 		owner.Detach(c)
+		s.mu.Unlock()
 		return
 	}
 
-	// A newer valid presenter replaces the previous generation.
-	s.mu.Lock()
+	// The generations are published in lock order, so this one is newer than
+	// every presenter that has completed its handshake.
 	old := s.current
 	s.current = c
 	s.mu.Unlock()
