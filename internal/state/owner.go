@@ -127,6 +127,11 @@ func (o *Owner) Update(key protocol.ItemKey, item protocol.Item) {
 			return
 		}
 		next := cloneItem(item)
+		if err := o.checkPixmapAggregate(record, next); err != nil {
+			// Publishing this generation would make every future snapshot
+			// invalid, so keep the last publishable state instead.
+			return
+		}
 		// A read that found nothing new is not an event. The ownership
 		// inspection refreshes every registration once, and applications emit
 		// property signals far more often than their properties actually
@@ -202,13 +207,50 @@ func (o *Owner) Attach(sink Sink) (protocol.Snapshot, error) {
 		return protocol.Snapshot{}, errors.New("state: nil presenter sink")
 	}
 	var snapshot protocol.Snapshot
+	var attachErr error
 	if !o.submit(func() {
-		o.sink = sink
+		// Validate before installing the sink. A rejected attachment must not
+		// replace the presenter that is already receiving deltas.
 		snapshot = o.snapshotLocked()
+		if err := snapshot.Validate(); err != nil {
+			attachErr = err
+			return
+		}
+		o.sink = sink
 	}) {
 		return protocol.Snapshot{}, errors.New("state: owner is closed")
 	}
+	if attachErr != nil {
+		return protocol.Snapshot{}, attachErr
+	}
 	return snapshot, nil
+}
+
+// checkPixmapAggregate reports whether replacing one entry with candidate
+// would keep the published snapshot inside the aggregate pixmap budget.
+func (o *Owner) checkPixmapAggregate(replaced *entry, candidate protocol.Item) error {
+	added, err := candidate.PixmapBytes()
+	if err != nil {
+		return err
+	}
+	var total uint64
+	for _, record := range o.items {
+		if record == replaced || !record.hasItem {
+			continue
+		}
+		bytes, err := record.item.PixmapBytes()
+		if err != nil {
+			return err
+		}
+		total += bytes
+		if total > protocol.MaxPixmapBytesAggregate {
+			return errors.New("state: snapshot exceeds aggregate pixmap budget")
+		}
+	}
+	if total+added > protocol.MaxPixmapBytesAggregate {
+		return errors.New("state: snapshot exceeds aggregate pixmap budget")
+	}
+	return nil
 }
 
 // Detach removes a sink if it is still the connected one.
