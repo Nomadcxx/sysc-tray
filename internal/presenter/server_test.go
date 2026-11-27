@@ -428,3 +428,44 @@ func sample(key protocol.ItemKey, title string) protocol.Item {
 		Icon: protocol.Icon{Name: "sample"},
 	}
 }
+
+// TestServerCloseUnblocksInFlightHandshake covers #9: an accepted connection
+// that has not finished its hello must not keep Close waiting for the
+// handshake deadline, and it must not survive shutdown.
+func TestServerCloseUnblocksInFlightHandshake(t *testing.T) {
+	server, _, _ := serve(t)
+	conn := dial(t, server)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		server.mu.Lock()
+		accepted := len(server.accepted)
+		server.mu.Unlock()
+		if accepted > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the server never accepted the handshake connection")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	closed := make(chan error, 1)
+	start := time.Now()
+	go func() { closed <- server.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close() = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close waited for the handshake deadline instead of closing the connection")
+	}
+	if elapsed := time.Since(start); elapsed >= handshakeTimeout {
+		t.Fatalf("Close took %v, want less than the %v handshake timeout", elapsed, handshakeTimeout)
+	}
+
+	if _, err := readEnvelopeWithin(conn, time.Second); err == nil {
+		t.Fatal("a connection that was still handshaking survived shutdown")
+	}
+}
