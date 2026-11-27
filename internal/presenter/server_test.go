@@ -150,6 +150,72 @@ func TestServerReplacesThePresenterGeneration(t *testing.T) {
 	}
 }
 
+// TestServerSerializesOverlappingHandshakes covers #13: an older handshake
+// that attached its sink must finish publishing before a newer handshake can
+// attach, so the newer connection cannot end up current with no sink.
+func TestServerSerializesOverlappingHandshakes(t *testing.T) {
+	server, owner, _ := serve(t)
+	key := itemKey(1)
+	owner.Add(key)
+	owner.Update(key, sample(key, "Chat"))
+
+	socketPath := server.SocketPath()
+	attached := make(chan struct{})
+	release := make(chan struct{})
+	first := true
+	server.afterSinkAttach = func() {
+		if !first {
+			return
+		}
+		first = false
+		close(attached)
+		<-release
+	}
+
+	olderDone := make(chan error, 1)
+	older := dial(t, server)
+	go func() {
+		writeEnvelope(t, older, helloEnvelope(protocol.ProtocolMajor, RequiredCapability))
+		if _, err := readEnvelopeWithin(older, 3*time.Second); err != nil {
+			olderDone <- err
+			return
+		}
+		if _, err := readEnvelopeWithin(older, 3*time.Second); err != nil {
+			olderDone <- err
+			return
+		}
+		olderDone <- nil
+	}()
+
+	<-attached
+
+	newer, err := net.DialTimeout("unix", socketPath, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = newer.Close() })
+	writeEnvelope(t, newer, helloEnvelope(protocol.ProtocolMajor, RequiredCapability))
+	if envelope, err := readEnvelopeWithin(newer, 200*time.Millisecond); err == nil {
+		t.Fatalf("newer presenter completed its handshake while the older one was publishing: %q", envelope.Kind)
+	}
+
+	close(release)
+	if err := <-olderDone; err != nil {
+		t.Fatal(err)
+	}
+	if envelope := readEnvelope(t, newer); envelope.Kind != protocol.KindHello {
+		t.Fatalf("newer first message = %q, want hello", envelope.Kind)
+	}
+	if envelope := readEnvelope(t, newer); envelope.Kind != protocol.KindSnapshot {
+		t.Fatalf("newer second message = %q, want snapshot", envelope.Kind)
+	}
+
+	owner.Update(key, sample(key, "Chat (2)"))
+	if envelope := readEnvelope(t, newer); envelope.Kind != protocol.KindItemChanged {
+		t.Fatalf("active presenter received %q", envelope.Kind)
+	}
+}
+
 func TestServerRepliesToEachCommandWithItsRequestID(t *testing.T) {
 	server, owner, commands := serve(t)
 	key := itemKey(1)
