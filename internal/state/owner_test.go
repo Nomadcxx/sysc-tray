@@ -126,7 +126,9 @@ func TestOwnerEnforcesTheItemCapWithoutDisturbingExistingItems(t *testing.T) {
 	for i := 1; i <= protocol.MaxItems; i++ {
 		key := itemKey(uint64(i))
 		key.Owner = fmt.Sprintf(":1.%d", i)
-		owner.Add(key)
+		if !owner.Add(key) {
+			t.Fatalf("Add() refused item %d below the cap", i)
+		}
 		owner.Update(key, sample(key, "Item"))
 	}
 	if got := len(owner.Snapshot().Items); got != protocol.MaxItems {
@@ -135,7 +137,9 @@ func TestOwnerEnforcesTheItemCapWithoutDisturbingExistingItems(t *testing.T) {
 
 	overflow := itemKey(uint64(protocol.MaxItems + 1))
 	overflow.Owner = ":1.overflow"
-	owner.Add(overflow)
+	if owner.Add(overflow) {
+		t.Fatal("Add() accepted an item over the cap")
+	}
 	owner.Update(overflow, sample(overflow, "Rejected"))
 
 	snapshot := owner.Snapshot()
