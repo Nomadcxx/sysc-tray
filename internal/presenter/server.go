@@ -53,6 +53,8 @@ type Server struct {
 	current    *connection
 	nextGen    uint64
 	started    bool
+	closing    bool
+	accepted   map[*net.UnixConn]struct{}
 
 	// afterSinkAttach is a test hook that runs while a handshake owns the
 	// publication lock. Production leaves it nil.
@@ -115,10 +117,21 @@ func (s *Server) Close() error {
 	s.closeOnce.Do(func() {
 		close(s.stop)
 		s.mu.Lock()
+		s.closing = true
 		listener, current, path := s.listener, s.current, s.socketPath
+		accepted := make([]*net.UnixConn, 0, len(s.accepted))
+		for socket := range s.accepted {
+			accepted = append(accepted, socket)
+		}
 		s.mu.Unlock()
 		if listener != nil {
 			result = errors.Join(result, listener.Close())
+		}
+		// Close connections that are still in the handshake. They are not
+		// s.current yet, so closing only the presenter would leave their
+		// handlers blocked reading a hello until the deadline expires.
+		for _, socket := range accepted {
+			result = errors.Join(result, socket.Close())
 		}
 		if current != nil {
 			current.fail()
@@ -156,6 +169,11 @@ func (s *Server) acceptLoop() {
 
 func (s *Server) handle(socket *net.UnixConn) {
 	defer s.wg.Done()
+	if !s.trackAccepted(socket) {
+		_ = socket.Close()
+		return
+	}
+	defer s.untrackAccepted(socket)
 	c := newConnection(socket, 0)
 	writerStarted := false
 	defer func() {
@@ -237,6 +255,28 @@ func (s *Server) handle(socket *net.UnixConn) {
 	writerStarted = true
 	go c.writeLoop()
 	c.readLoop(commands)
+}
+
+// trackAccepted records a connection for shutdown. It refuses connections
+// accepted after Close started, so none can be created between Close's
+// snapshot and its wait.
+func (s *Server) trackAccepted(socket *net.UnixConn) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closing {
+		return false
+	}
+	if s.accepted == nil {
+		s.accepted = make(map[*net.UnixConn]struct{})
+	}
+	s.accepted[socket] = struct{}{}
+	return true
+}
+
+func (s *Server) untrackAccepted(socket *net.UnixConn) {
+	s.mu.Lock()
+	delete(s.accepted, socket)
+	s.mu.Unlock()
 }
 
 func (s *Server) connectionDone(c *connection) {
