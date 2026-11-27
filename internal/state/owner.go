@@ -91,9 +91,11 @@ func (o *Owner) submit(command func()) bool {
 	}
 }
 
-// Add registers a generation. When the item cap is full the registration is
-// refused and every existing item is left untouched.
-func (o *Owner) Add(key protocol.ItemKey) {
+// Add registers a generation and reports whether it was accepted. When the
+// item cap is full the registration is refused and every existing item is left
+// untouched; callers must not start per-item work for a refused generation.
+func (o *Owner) Add(key protocol.ItemKey) bool {
+	accepted := false
 	o.submit(func() {
 		spot := address{owner: key.Owner, path: key.ObjectPath}
 		existing, known := o.items[spot]
@@ -109,7 +111,9 @@ func (o *Owner) Add(key protocol.ItemKey) {
 		}
 		o.items[spot] = &entry{key: key}
 		o.order = append(o.order, spot)
+		accepted = true
 	})
+	return accepted
 }
 
 // Update accepts a refresh result. A result naming a superseded generation is

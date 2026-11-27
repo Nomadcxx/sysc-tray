@@ -240,7 +240,12 @@ func (a *App) ItemAdded(key watcher.Key) {
 	if closing || conn == nil || owner == nil {
 		return
 	}
-	owner.Add(itemKey)
+	if !owner.Add(itemKey) {
+		// The item cap only bounds state if a refused registration also stays
+		// out of the worker path. Nothing is watching this generation, so the
+		// watcher has to report it again if a slot later opens.
+		return
+	}
 
 	proxy := item.NewProxy(conn, itemKey, limiter, a.onItem)
 	a.mu.Lock()
