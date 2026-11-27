@@ -48,6 +48,10 @@ type Proxy struct {
 	mu       sync.RWMutex
 	revision uint32
 	known    bool
+	// stale is set as soon as a newer LayoutUpdated is seen. The revision in
+	// the cache still describes the tree the user saw, so commands naming it
+	// must be refused until the refetch publishes the new tree.
+	stale bool
 }
 
 func NewProxy(conn *dbus.Conn, key protocol.ItemKey, path string, publish func(Update)) *Proxy {
@@ -170,6 +174,11 @@ func (p *Proxy) handle(signal *dbus.Signal) {
 		if known && revision < current {
 			return
 		}
+		if !known || revision > current {
+			p.mu.Lock()
+			p.stale = true
+			p.mu.Unlock()
+		}
 		p.trigger()
 	case Interface + ".ItemsPropertiesUpdated":
 		// Property-only updates carry no revision; the refetch republishes the
@@ -218,7 +227,7 @@ func (p *Proxy) refresh() {
 		return
 	}
 	p.mu.Lock()
-	p.revision, p.known = revision, true
+	p.revision, p.known, p.stale = revision, true, false
 	p.mu.Unlock()
 	p.publish(Update{Key: p.key, Menu: tree})
 }
@@ -294,7 +303,16 @@ func (p *Proxy) check(key protocol.ItemKey, revision uint32) error {
 	if key != p.key {
 		return &protocol.ProtocolError{Code: protocol.ErrorStaleItem, Message: "item generation changed"}
 	}
-	if current := p.Revision(); current != revision {
+	p.mu.RLock()
+	current, stale := p.revision, p.stale
+	p.mu.RUnlock()
+	if stale {
+		return &protocol.ProtocolError{
+			Code:    protocol.ErrorStaleRevision,
+			Message: fmt.Sprintf("menu revision %d is being refreshed", current),
+		}
+	}
+	if current != revision {
 		return &protocol.ProtocolError{
 			Code:    protocol.ErrorStaleRevision,
 			Message: fmt.Sprintf("menu revision is %d", current),
