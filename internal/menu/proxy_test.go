@@ -228,6 +228,49 @@ func TestProxyRefusesStaleSelectionWithoutInvoking(t *testing.T) {
 	}
 }
 
+// TestProxyRefusesCommandsWhileANewLayoutLoads covers #8: after
+// LayoutUpdated announces revision N+1, the cached tree at revision N is no
+// longer current, even before GetLayout returns. Commands naming N must not
+// reach the application.
+func TestProxyRefusesCommandsWhileANewLayoutLoads(t *testing.T) {
+	conn := privateConn(t)
+	fake := exportFakeMenu(t, conn, 1, node(0, nil, node(1, props("label", "Open"))))
+	updates := make(chan Update, 8)
+	proxy := start(t, conn, fake, updates)
+	defer proxy.Close()
+	awaitUpdate(t, updates)
+
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	fake.blockNextLayoutRead(entered, release)
+	fake.setLayout(2, node(0, nil, node(1, props("label", "Close"))))
+	fake.emitLayoutUpdated(t, 2)
+
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the proxy never started the refresh")
+	}
+
+	err := proxy.Select(fake.key, 1, 1, 100)
+	var refusal *protocol.ProtocolError
+	if !errors.As(err, &refusal) || refusal.Code != protocol.ErrorStaleRevision {
+		t.Fatalf("selection during refresh returned %v, want stale_revision", err)
+	}
+	if got := fake.events(); len(got) != 0 {
+		t.Fatalf("selection during refresh invoked %v", got)
+	}
+
+	close(release)
+	tree := awaitUpdate(t, updates).Menu
+	if tree.Revision != 2 {
+		t.Fatalf("refreshed revision = %d, want 2", tree.Revision)
+	}
+	if err := proxy.Select(fake.key, 2, 1, 100); err != nil {
+		t.Fatalf("selection at the refreshed revision failed: %v", err)
+	}
+}
+
 func TestProxyRefusesCommandsForAnotherGeneration(t *testing.T) {
 	conn := privateConn(t)
 	fake := exportFakeMenu(t, conn, 1, node(0, nil, node(1, props("label", "Open"))))
@@ -374,6 +417,8 @@ type fakeMenu struct {
 	reads      int
 	needUpdate bool
 	failing    bool
+	gateIn     chan struct{}
+	gateOut    chan struct{}
 }
 
 type blockedMenu struct {
@@ -404,12 +449,28 @@ func exportFakeMenu(t *testing.T, host *dbus.Conn, revision uint32, root layoutN
 
 func (f *fakeMenu) GetLayout(parent int32, depth int32, names []string) (uint32, layoutNode, *dbus.Error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.reads++
 	if f.failing {
+		f.mu.Unlock()
 		return 0, layoutNode{}, dbus.NewError("org.freedesktop.DBus.Error.Failed", []any{"menu unavailable"})
 	}
-	return f.revision, f.root, nil
+	revision, root := f.revision, f.root
+	gateIn, gateOut := f.gateIn, f.gateOut
+	f.gateIn, f.gateOut = nil, nil
+	f.mu.Unlock()
+	if gateIn != nil {
+		gateIn <- struct{}{}
+		<-gateOut
+	}
+	return revision, root, nil
+}
+
+// blockNextLayoutRead holds the next GetLayout reply so a test can inspect the
+// window between a LayoutUpdated announcement and the refreshed cache.
+func (f *fakeMenu) blockNextLayoutRead(entered chan struct{}, release chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.gateIn, f.gateOut = entered, release
 }
 
 func (f *fakeMenu) Event(id int32, event string, data dbus.Variant, timestamp uint32) *dbus.Error {
